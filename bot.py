@@ -32,11 +32,9 @@ MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 
 # ── Auto-detect yt-dlp ────────────────────────────────────────────────────────
 def find_ytdlp():
-    # 1. system command
     if shutil.which("yt-dlp"):
         logger.info("yt-dlp found as system command")
         return ["yt-dlp"]
-    # 2. python module
     try:
         subprocess.run([sys.executable, "-m", "yt_dlp", "--version"],
                        capture_output=True, check=True)
@@ -44,14 +42,12 @@ def find_ytdlp():
         return [sys.executable, "-m", "yt_dlp"]
     except Exception:
         pass
-    # 3. pip install it now
     logger.warning("yt-dlp not found! Installing now...")
     subprocess.run([sys.executable, "-m", "pip", "install", "yt-dlp", "-q"], check=True)
     logger.info("yt-dlp installed successfully")
     return [sys.executable, "-m", "yt_dlp"]
 
 YT_DLP = find_ytdlp()
-logger.info("Using YT_DLP command: %s", YT_DLP)
 
 QUALITY_FORMATS = {
     "360":  "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360]",
@@ -68,7 +64,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters as tg_filters,
 )
 
-# ── Pyrogram client ───────────────────────────────────────────────────────────
+# ── Pyrogram client — started ONCE and kept alive ─────────────────────────────
 pyro = Client(
     "yt_bot_session",
     api_id=API_ID,
@@ -149,8 +145,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🖼️ *Thumbnail* — High-res cover image\n"
         "📦 *All in one* — Video + Thumbnail together\n\n"
         "✅ Supports files up to *2 GB*!\n\n"
-        "Just send me a YouTube link and let's go! 🚀\n\n"
-        "Type /help anytime if you need help 😊",
+        "Just send me a YouTube link and let's go! 🚀",
         parse_mode="Markdown",
     )
 
@@ -217,8 +212,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🤔 That doesn't look like a YouTube link!\n\n"
             "Please send a link like:\n"
-            "`https://youtube.com/watch?v=...`\n"
-            "`https://youtu.be/...`",
+            "`https://youtube.com/watch?v=...`",
             parse_mode="Markdown",
         )
         return
@@ -230,11 +224,9 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not info:
         await status.edit_text(
             "😕 Oops! Couldn't fetch video info.\n\n"
-            "Please check:\n"
             "▪️ Is the link correct?\n"
             "▪️ Is the video public?\n"
-            "▪️ Try again in a moment!\n\n"
-            "Or use /cancel to reset."
+            "▪️ Try again in a moment!"
         )
         return
 
@@ -275,19 +267,21 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for f in DOWNLOAD_DIR.glob("*"):
         f.unlink(missing_ok=True)
 
+    success = False
     try:
         if action.startswith("vid_"):
             quality = action.split("_")[1]
-            await download_video(context.bot, chat_id, url, quality, duration, title, query.message.message_id)
+            success = await download_video(context.bot, chat_id, url, quality, duration, title, query.message.message_id)
         elif action == "dl_audio":
-            await download_audio(context.bot, chat_id, url, duration, title, query.message.message_id)
+            success = await download_audio(context.bot, chat_id, url, duration, title, query.message.message_id)
         elif action == "dl_thumb":
-            await download_thumbnail(context.bot, chat_id, url, title)
+            success = await download_thumbnail(context.bot, chat_id, url, title)
         elif action == "dl_all":
-            await download_video(context.bot, chat_id, url, "best", duration, title, query.message.message_id)
+            v = await download_video(context.bot, chat_id, url, "best", duration, title, query.message.message_id)
             for f in DOWNLOAD_DIR.glob("*.mp4"):
                 f.unlink(missing_ok=True)
-            await download_thumbnail(context.bot, chat_id, url, title)
+            t = await download_thumbnail(context.bot, chat_id, url, title)
+            success = v and t
     except Exception as e:
         logger.exception("Download error")
         await context.bot.send_message(
@@ -296,10 +290,13 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-    await query.edit_message_text("✅ All done! Enjoy! 🎉\n\nSend another link anytime 😊")
+    if success:
+        await query.edit_message_text("✅ All done! Enjoy! 🎉\n\nSend another link anytime 😊")
+    else:
+        await query.edit_message_text("😕 Something went wrong. Please try again or send a new link!")
 
 # ── Download Functions ────────────────────────────────────────────────────────
-async def download_video(bot, chat_id, url, quality, duration, title, status_msg_id):
+async def download_video(bot, chat_id, url, quality, duration, title, status_msg_id) -> bool:
     fmt   = QUALITY_FORMATS.get(quality, QUALITY_FORMATS["best"])
     label = f"{quality}p" if quality != "best" else "best quality"
     out_template = str(DOWNLOAD_DIR / "%(title).60s.%(ext)s")
@@ -317,12 +314,12 @@ async def download_video(bot, chat_id, url, quality, duration, title, status_msg
 
     if code != 0:
         await bot.send_message(chat_id, f"😕 Download failed!\n```{err[-400:]}```", parse_mode="Markdown")
-        return
+        return False
 
     files = list(DOWNLOAD_DIR.glob("*.mp4"))
     if not files:
         await bot.send_message(chat_id, "😕 File not found after download. Try again!")
-        return
+        return False
 
     video_path = files[0]
     size = video_path.stat().st_size
@@ -332,7 +329,7 @@ async def download_video(bot, chat_id, url, quality, duration, title, status_msg
             f"😬 File is {human_size(size)} — too large!\n"
             "Try a lower quality like 360p or 720p."
         )
-        return
+        return False
 
     await bot.edit_message_text(
         chat_id=chat_id, message_id=status_msg_id,
@@ -340,7 +337,12 @@ async def download_video(bot, chat_id, url, quality, duration, title, status_msg
     )
 
     progress = make_progress(bot, chat_id, status_msg_id, "video")
-    async with pyro:
+
+    try:
+        # Start pyro if not already running
+        if not pyro.is_connected:
+            await pyro.start()
+
         await pyro.send_video(
             chat_id=chat_id,
             video=str(video_path),
@@ -349,8 +351,28 @@ async def download_video(bot, chat_id, url, quality, duration, title, status_msg
             supports_streaming=True,
             progress=progress,
         )
+        return True
+    except Exception as e:
+        logger.exception("Pyrogram upload error")
+        # Fallback to normal bot upload for smaller files
+        if size <= 50 * 1024 * 1024:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=status_msg_id,
+                text=f"📤 Uploading via fallback ({human_size(size)})…"
+            )
+            with open(video_path, "rb") as vf:
+                await bot.send_video(
+                    chat_id, video=vf,
+                    caption=f"🎬 {title}",
+                    duration=duration,
+                    supports_streaming=True,
+                )
+            return True
+        await bot.send_message(chat_id, f"😕 Upload failed: `{e}`", parse_mode="Markdown")
+        return False
 
-async def download_audio(bot, chat_id, url, duration, title, status_msg_id):
+
+async def download_audio(bot, chat_id, url, duration, title, status_msg_id) -> bool:
     out_template = str(DOWNLOAD_DIR / "%(title).60s.%(ext)s")
 
     await bot.edit_message_text(
@@ -367,12 +389,12 @@ async def download_audio(bot, chat_id, url, duration, title, status_msg_id):
 
     if code != 0:
         await bot.send_message(chat_id, f"😕 Audio download failed!\n```{err[-400:]}```", parse_mode="Markdown")
-        return
+        return False
 
     files = list(DOWNLOAD_DIR.glob("*.mp3"))
     if not files:
         await bot.send_message(chat_id, "😕 Audio file not found. Try again!")
-        return
+        return False
 
     audio_path = files[0]
     size = audio_path.stat().st_size
@@ -383,7 +405,11 @@ async def download_audio(bot, chat_id, url, duration, title, status_msg_id):
     )
 
     progress = make_progress(bot, chat_id, status_msg_id, "audio")
-    async with pyro:
+
+    try:
+        if not pyro.is_connected:
+            await pyro.start()
+
         await pyro.send_audio(
             chat_id=chat_id,
             audio=str(audio_path),
@@ -391,8 +417,18 @@ async def download_audio(bot, chat_id, url, duration, title, status_msg_id):
             duration=duration,
             progress=progress,
         )
+        return True
+    except Exception as e:
+        logger.exception("Pyrogram audio upload error")
+        if size <= 50 * 1024 * 1024:
+            with open(audio_path, "rb") as af:
+                await bot.send_audio(chat_id, audio=af, title=title, duration=duration)
+            return True
+        await bot.send_message(chat_id, f"😕 Upload failed: `{e}`", parse_mode="Markdown")
+        return False
 
-async def download_thumbnail(bot, chat_id, url, title):
+
+async def download_thumbnail(bot, chat_id, url, title) -> bool:
     out_template = str(DOWNLOAD_DIR / "%(title).60s.%(ext)s")
     await bot.send_message(chat_id, "⬇️ Downloading thumbnail… 🖼️")
 
@@ -404,19 +440,32 @@ async def download_thumbnail(bot, chat_id, url, title):
 
     if code != 0:
         await bot.send_message(chat_id, f"😕 Thumbnail failed!\n```{err[-400:]}```", parse_mode="Markdown")
-        return
+        return False
 
     files = (list(DOWNLOAD_DIR.glob("*.jpg")) +
              list(DOWNLOAD_DIR.glob("*.webp")) +
              list(DOWNLOAD_DIR.glob("*.png")))
     if not files:
         await bot.send_message(chat_id, "😕 Thumbnail not found.")
-        return
+        return False
 
     with open(files[0], "rb") as tf:
         await bot.send_photo(chat_id, photo=tf, caption=f"🖼️ {title}")
+    return True
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+async def post_init(app: Application) -> None:
+    """Start Pyrogram when bot starts."""
+    logger.info("Starting Pyrogram client...")
+    await pyro.start()
+    logger.info("✅ Pyrogram client connected!")
+
+async def post_shutdown(app: Application) -> None:
+    """Stop Pyrogram when bot stops."""
+    if pyro.is_connected:
+        await pyro.stop()
+
 def main():
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN not set!")
@@ -425,7 +474,14 @@ def main():
         print("❌ SESSION_STRING not set!")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+
     app.add_handler(CommandHandler("start",  start))
     app.add_handler(CommandHandler("help",   help_cmd))
     app.add_handler(CommandHandler("about",  about_cmd))

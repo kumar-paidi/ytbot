@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 YouTube Downloader Telegram Bot - 2GB support via Pyrogram
-Friendly & fun style with full commands
 """
 
 import os
@@ -10,6 +9,7 @@ import json
 import asyncio
 import logging
 import shutil
+import subprocess
 from pathlib import Path
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -30,8 +30,28 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 
-# Works on both Windows and Linux/Railway
-YT_DLP = ["yt-dlp"] if shutil.which("yt-dlp") else [sys.executable, "-m", "yt_dlp"]
+# ── Auto-detect yt-dlp ────────────────────────────────────────────────────────
+def find_ytdlp():
+    # 1. system command
+    if shutil.which("yt-dlp"):
+        logger.info("yt-dlp found as system command")
+        return ["yt-dlp"]
+    # 2. python module
+    try:
+        subprocess.run([sys.executable, "-m", "yt_dlp", "--version"],
+                       capture_output=True, check=True)
+        logger.info("yt-dlp found as python module")
+        return [sys.executable, "-m", "yt_dlp"]
+    except Exception:
+        pass
+    # 3. pip install it now
+    logger.warning("yt-dlp not found! Installing now...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "yt-dlp", "-q"], check=True)
+    logger.info("yt-dlp installed successfully")
+    return [sys.executable, "-m", "yt_dlp"]
+
+YT_DLP = find_ytdlp()
+logger.info("Using YT_DLP command: %s", YT_DLP)
 
 QUALITY_FORMATS = {
     "360":  "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360]",
@@ -48,7 +68,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters as tg_filters,
 )
 
-# ── Pyrogram client (for large file uploads) ──────────────────────────────────
+# ── Pyrogram client ───────────────────────────────────────────────────────────
 pyro = Client(
     "yt_bot_session",
     api_id=API_ID,
@@ -80,11 +100,12 @@ async def run(cmd):
 async def get_video_info(url: str):
     code, out, err = await run([*YT_DLP, "--dump-json", "--no-playlist", url])
     if code != 0:
-        logger.error("yt-dlp error: %s", err)
+        logger.error("yt-dlp error (code %s): %s", code, err[:500])
         return None
     try:
         return json.loads(out)
-    except Exception:
+    except Exception as e:
+        logger.error("JSON parse error: %s", e)
         return None
 
 def build_caption(info: dict) -> str:
@@ -106,11 +127,12 @@ def make_progress(bot, chat_id, status_msg_id, label):
         pct = int(current * 100 / total)
         if pct - last["pct"] >= 10:
             last["pct"] = pct
+            bar = "▓" * (pct // 10) + "░" * (10 - pct // 10)
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=status_msg_id,
-                    text=f"📤 Uploading {label}… {pct}% {'▓' * (pct//10)}{'░' * (10 - pct//10)}"
+                    text=f"📤 Uploading {label}… {pct}%\n{bar}"
                 )
             except Exception:
                 pass
@@ -149,14 +171,14 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ youtube.com/watch?v=...\n"
         "✅ youtu.be/...\n"
         "✅ youtube.com/shorts/...\n\n"
-        "⚠️ *Note:* Very long videos might take a while to download. Please be patient! ⏳",
+        "⚠️ Very long videos might take a while. Be patient! ⏳",
         parse_mode="Markdown",
     )
 
 async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *About YouTube Downloader Bot*\n\n"
-        "I'm a fast & friendly YouTube downloader bot! 😎\n\n"
+        "I'm a fast & friendly YouTube downloader! 😎\n\n"
         "⚙️ *Powered by:*\n"
         "▪️ yt-dlp — for downloading\n"
         "▪️ FFmpeg — for merging video & audio\n"
@@ -166,8 +188,7 @@ async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "▪️ Multiple quality options\n"
         "▪️ Audio extraction (MP3)\n"
         "▪️ Thumbnail download\n"
-        "▪️ Upload progress bar\n\n"
-        "💡 Just send a YouTube link to get started!",
+        "▪️ Upload progress bar 📊",
         parse_mode="Markdown",
     )
 
@@ -184,7 +205,7 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def unknown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤔 Hmm, I don't know that command!\n\n"
+        "🤔 Hmm, I don't know that command!\n"
         "Try /help to see what I can do 😊"
     )
 
@@ -212,7 +233,8 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please check:\n"
             "▪️ Is the link correct?\n"
             "▪️ Is the video public?\n"
-            "▪️ Try again in a moment!"
+            "▪️ Try again in a moment!\n\n"
+            "Or use /cancel to reset."
         )
         return
 
@@ -240,9 +262,7 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = context.user_data.get("url")
     if not url:
-        await query.edit_message_text(
-            "⚠️ Session expired!\n\nPlease send the YouTube link again 😊"
-        )
+        await query.edit_message_text("⚠️ Session expired! Please send the YouTube link again 😊")
         return
 
     action   = query.data
@@ -272,7 +292,7 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Download error")
         await context.bot.send_message(
             chat_id,
-            f"😵 Something went wrong!\n\n`{e}`\n\nTry again or use /cancel to reset.",
+            f"😵 Something went wrong!\n\n`{e}`\n\nTry /cancel to reset.",
             parse_mode="Markdown"
         )
 
@@ -309,14 +329,14 @@ async def download_video(bot, chat_id, url, quality, duration, title, status_msg
 
     if size > MAX_FILE_BYTES:
         await bot.send_message(chat_id,
-            f"😬 File is {human_size(size)} — too large even for 2GB limit!\n"
+            f"😬 File is {human_size(size)} — too large!\n"
             "Try a lower quality like 360p or 720p."
         )
         return
 
     await bot.edit_message_text(
         chat_id=chat_id, message_id=status_msg_id,
-        text=f"📤 Uploading video ({human_size(size)})… 0% ░░░░░░░░░░"
+        text=f"📤 Uploading video ({human_size(size)})… 0%\n░░░░░░░░░░"
     )
 
     progress = make_progress(bot, chat_id, status_msg_id, "video")
@@ -324,7 +344,7 @@ async def download_video(bot, chat_id, url, quality, duration, title, status_msg
         await pyro.send_video(
             chat_id=chat_id,
             video=str(video_path),
-            caption=f"🎬 {title}\n\n📥 Downloaded by @YourBotUsername",
+            caption=f"🎬 {title}",
             duration=duration,
             supports_streaming=True,
             progress=progress,
@@ -359,7 +379,7 @@ async def download_audio(bot, chat_id, url, duration, title, status_msg_id):
 
     await bot.edit_message_text(
         chat_id=chat_id, message_id=status_msg_id,
-        text=f"📤 Uploading audio ({human_size(size)})… 0% ░░░░░░░░░░"
+        text=f"📤 Uploading audio ({human_size(size)})… 0%\n░░░░░░░░░░"
     )
 
     progress = make_progress(bot, chat_id, status_msg_id, "audio")
@@ -406,7 +426,6 @@ def main():
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start",  start))
     app.add_handler(CommandHandler("help",   help_cmd))
     app.add_handler(CommandHandler("about",  about_cmd))

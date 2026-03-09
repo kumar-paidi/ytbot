@@ -28,7 +28,8 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB (Pyrogram limit)
 
-YT_DLP = [sys.executable, "-m", "yt_dlp"]
+import shutil
+YT_DLP = ["yt-dlp"] if shutil.which("yt-dlp") else [sys.executable, "-m", "yt_dlp"]
 
 QUALITY_FORMATS = {
     "360":  "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360]",
